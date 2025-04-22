@@ -1,0 +1,277 @@
+mport collections  # Helpful for organizing results
+from ortools.sat.python import cp_model
+
+# --- Parameters ---
+NUM_STUDENTS = 90
+NUM_CLASSES = 6
+# Assuming equal class sizes
+# Ensure NUM_STUDENTS is divisible by NUM_CLASSES for this simple approach
+if NUM_STUDENTS % NUM_CLASSES != 0:
+    print(f"Warning: {NUM_STUDENTS} students cannot be evenly divided into {NUM_CLASSES} classes.")
+    # Handle this case as needed (e.g., allow slightly uneven classes)
+CLASS_SIZE = NUM_STUDENTS // NUM_CLASSES
+
+print(f"Attempting to sort {NUM_STUDENTS} students into {NUM_CLASSES} classes of size {CLASS_SIZE}.")
+
+# --- Student Data ---
+# Create a list of student IDs (e.g., 0 to 89)
+all_students = list(range(NUM_STUDENTS))
+
+# ---------------------------------------------------------------
+# --- !!! REPLACE BELOW WITH YOUR ACTUAL DATA !!! ---
+# ---------------------------------------------------------------
+
+# --- Admin Absolute Recommendations (MUST be satisfied) ---
+# Format: [(student_id_1, student_id_2), ...]
+admin_must_together = [(20, 21)] # Example: These two MUST be in the same class
+admin_must_separate = [(50, 51), (60, 61)] # Example: These MUST NOT be in the same class
+
+# --- Student Preferences (Categorized by Priority) ---
+# Format: [(student_id_1, student_id_2), ...]
+
+# WANT TOGETHER
+student_want_together_high = [(0, 1), (5, 12)] # High priority 'want' pairs
+student_want_together_mid = [(0, 5), (7, 8)]   # Medium priority 'want' pairs
+student_want_together_low = [] # Low priority 'want' pairs (Add pairs here if any)
+
+# DON'T WANT TOGETHER
+student_dont_want_together_high = [(3, 4), (10, 15)] # High priority 'don't want' pairs
+student_dont_want_together_mid = [(2, 3)]           # Medium priority 'don't want' pairs
+student_dont_want_together_low = [(11, 12)]         # Low priority 'don't want' pairs
+
+# --- (Optional) Teacher Recommendations (Non-Absolute - Treated as High Priority Soft Constraints) ---
+# Use this if teachers have recommendations that aren't absolute admin mandates
+teacher_recommend_together = [(30, 31)] # Example: Teacher strongly suggests these two together
+teacher_recommend_separate = [(70, 71)] # Example: Teacher strongly suggests separating these two
+
+# ---------------------------------------------------------------
+# --- END OF DATA INPUT SECTION ---
+# ---------------------------------------------------------------
+
+
+# --- Weights for Preferences (Adjust relative values to reflect priorities) ---
+# Higher weight = higher priority for the solver
+WEIGHT_STUDENT_WANT_LOW = 1
+WEIGHT_STUDENT_AVOID_LOW = 1 # Reward for successful separation (low prio)
+
+WEIGHT_STUDENT_WANT_MID = 5
+WEIGHT_STUDENT_AVOID_MID = 6 # Reward for successful separation (mid prio)
+
+WEIGHT_STUDENT_WANT_HIGH = 15
+WEIGHT_STUDENT_AVOID_HIGH = 20 # Reward for successful separation (high prio)
+
+WEIGHT_TEACHER_RECOMMEND_TOGETHER = 25 # Example weight for non-absolute teacher suggestions
+WEIGHT_TEACHER_RECOMMEND_SEPARATE = 30 # Example weight for non-absolute teacher suggestions
+
+# --- Create the CP-SAT Model ---
+model = cp_model.CpModel()
+
+# --- Define Variables ---
+# student_vars[student_id] holds the class number variable (0 to NUM_CLASSES-1)
+student_vars = {}
+for s in all_students:
+    student_vars[s] = model.NewIntVar(0, NUM_CLASSES - 1, f'student_{s}_class')
+
+# --- Add Hard Constraints ---
+print("Adding Hard Constraints...")
+
+# Class Size Constraint: Ensure each class has exactly CLASS_SIZE students
+for c in range(NUM_CLASSES):
+    model.AddCountEqual([student_vars[s] for s in all_students], c, CLASS_SIZE)
+print(f" - Added: Each of {NUM_CLASSES} classes must have {CLASS_SIZE} students.")
+
+# Admin "Must Separate" Constraint
+for s1, s2 in admin_must_separate:
+    if s1 in student_vars and s2 in student_vars: # Basic check if IDs are valid
+        print(f" - Added: Admin HARD constraint - {s1} MUST NOT be with {s2}")
+        model.Add(student_vars[s1] != student_vars[s2])
+    else:
+         print(f" - Warning: Invalid student ID in admin_must_separate pair ({s1}, {s2})")
+
+
+# Admin "Must Be Together" Constraint
+# WARNING: Too many/conflicting hard constraints can make the problem infeasible!
+for s1, s2 in admin_must_together:
+     if s1 in student_vars and s2 in student_vars:
+        print(f" - Added: Admin HARD constraint - {s1} MUST be with {s2}")
+        model.Add(student_vars[s1] == student_vars[s2])
+     else:
+         print(f" - Warning: Invalid student ID in admin_must_together pair ({s1}, {s2})")
+
+
+# --- Define Objective Function (Maximize Satisfaction Score) ---
+print("Defining Objective Function (Preferences)...")
+objective_terms = []
+# Store boolean vars for later inspection if needed
+objective_bool_vars = {}
+
+# --- Process Student "Want Together" Preferences by Priority ---
+for prio, weight, lst in [
+    ('low', WEIGHT_STUDENT_WANT_LOW, student_want_together_low),
+    ('mid', WEIGHT_STUDENT_WANT_MID, student_want_together_mid),
+    ('high', WEIGHT_STUDENT_WANT_HIGH, student_want_together_high)
+]:
+    for s1, s2 in lst:
+         if s1 in student_vars and s2 in student_vars:
+            var_name = f'want_{prio}_{s1}_{s2}'
+            bool_var = model.NewBoolVar(var_name)
+            model.Add(student_vars[s1] == student_vars[s2]).OnlyEnforceIf(bool_var)
+            model.Add(student_vars[s1] != student_vars[s2]).OnlyEnforceIf(bool_var.Not())
+            objective_terms.append(bool_var * weight)
+            objective_bool_vars[var_name] = bool_var
+         else:
+            print(f" - Warning: Invalid student ID in want_{prio} pair ({s1}, {s2})")
+
+
+# --- Process Student "Don't Want Together" Preferences by Priority ---
+# Remember: Reward is for successful separation
+for prio, weight, lst in [
+    ('low', WEIGHT_STUDENT_AVOID_LOW, student_dont_want_together_low),
+    ('mid', WEIGHT_STUDENT_AVOID_MID, student_dont_want_together_mid),
+    ('high', WEIGHT_STUDENT_AVOID_HIGH, student_dont_want_together_high)
+]:
+    for s1, s2 in lst:
+         if s1 in student_vars and s2 in student_vars:
+            var_name = f'avoid_{prio}_{s1}_{s2}'
+            bool_var = model.NewBoolVar(var_name)
+            model.Add(student_vars[s1] != student_vars[s2]).OnlyEnforceIf(bool_var)
+            model.Add(student_vars[s1] == student_vars[s2]).OnlyEnforceIf(bool_var.Not())
+            objective_terms.append(bool_var * weight)
+            objective_bool_vars[var_name] = bool_var
+         else:
+             print(f" - Warning: Invalid student ID in avoid_{prio} pair ({s1}, {s2})")
+
+
+# --- (Optional) Process Teacher Recommendations (as Soft Constraints) ---
+for s1, s2 in teacher_recommend_together:
+     if s1 in student_vars and s2 in student_vars:
+        var_name = f'teacher_rec_together_{s1}_{s2}'
+        bool_var = model.NewBoolVar(var_name)
+        model.Add(student_vars[s1] == student_vars[s2]).OnlyEnforceIf(bool_var)
+        model.Add(student_vars[s1] != student_vars[s2]).OnlyEnforceIf(bool_var.Not())
+        objective_terms.append(bool_var * WEIGHT_TEACHER_RECOMMEND_TOGETHER)
+        objective_bool_vars[var_name] = bool_var
+     else:
+         print(f" - Warning: Invalid student ID in teacher_recommend_together pair ({s1}, {s2})")
+
+
+for s1, s2 in teacher_recommend_separate:
+     if s1 in student_vars and s2 in student_vars:
+        var_name = f'teacher_rec_separate_{s1}_{s2}'
+        bool_var = model.NewBoolVar(var_name)
+        model.Add(student_vars[s1] != student_vars[s2]).OnlyEnforceIf(bool_var)
+        model.Add(student_vars[s1] == student_vars[s2]).OnlyEnforceIf(bool_var.Not())
+        objective_terms.append(bool_var * WEIGHT_TEACHER_RECOMMEND_SEPARATE)
+        objective_bool_vars[var_name] = bool_var
+     else:
+         print(f" - Warning: Invalid student ID in teacher_recommend_separate pair ({s1}, {s2})")
+
+
+# --- Set the Objective ---
+if objective_terms: # Only maximize if there are preferences to consider
+    model.Maximize(sum(objective_terms))
+    print(f"Added objective function with {len(objective_terms)} preference terms.")
+else:
+    print("Warning: No preferences defined in the objective function. Solving for feasibility only.")
+
+# --- Create the Solver and Solve ---
+solver = cp_model.CpSolver()
+# Set a time limit (e.g., 60 seconds) - adjust as needed
+solver.parameters.max_time_in_seconds = 60.0
+# Optional: Log search progress
+# solver.parameters.log_search_progress = True
+
+print(f"\nSolving model (time limit: {solver.parameters.max_time_in_seconds} seconds)...")
+status = solver.Solve(model)
+print("Solving finished.")
+
+# --- Process and Display the Results ---
+print(f"\nSolver status: {solver.StatusName(status)}")
+
+if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
+    print(f"Solution found!")
+    if objective_terms:
+        print(f"Optimal objective value (higher is better): {solver.ObjectiveValue()}")
+    else:
+         print("Feasible solution found (no objective defined).")
+
+    # Create a dictionary to hold class assignments
+    class_assignments = collections.defaultdict(list)
+    for s in all_students:
+        try:
+            assigned_class = solver.Value(student_vars[s])
+            class_assignments[assigned_class].append(s)
+        except IndexError:
+            print(f"Error retrieving value for student {s}. Was the student ID valid?")
+
+
+    # Print the assignments
+    print("\n--- Final Class Assignments ---")
+    for c in sorted(class_assignments.keys()):
+        print(f"\nClass {c} ({len(class_assignments[c])} students):")
+        print(sorted(class_assignments[c])) # Print sorted student IDs for clarity
+
+    # --- (Optional) Report on High Priority Preference Satisfaction ---
+    print("\n--- High Priority Preference Check ---")
+    high_priority_checks = {
+        "Want High": student_want_together_high,
+        "Avoid High": student_dont_want_together_high,
+        "Teacher Rec Together": teacher_recommend_together,
+        "Teacher Rec Separate": teacher_recommend_separate
+    }
+    prefs_checked = 0
+    prefs_met = 0
+
+    for pref_type, pref_list in high_priority_checks.items():
+        base_var_name_prefix = ""
+        if pref_type == "Want High": base_var_name_prefix = "want_high_"
+        elif pref_type == "Avoid High": base_var_name_prefix = "avoid_high_"
+        elif pref_type == "Teacher Rec Together": base_var_name_prefix = "teacher_rec_together_"
+        elif pref_type == "Teacher Rec Separate": base_var_name_prefix = "teacher_rec_separate_"
+
+        for s1, s2 in pref_list:
+             if s1 in student_vars and s2 in student_vars:
+                prefs_checked += 1
+                var_name = f"{base_var_name_prefix}{s1}_{s2}"
+                if var_name in objective_bool_vars:
+                    bool_var = objective_bool_vars[var_name]
+                    if solver.Value(bool_var):
+                        print(f"  - {pref_type} ({s1}, {s2}): MET")
+                        prefs_met += 1
+                    else:
+                        print(f"  - {pref_type} ({s1}, {s2}): *** NOT MET ***")
+                else:
+                    print(f"  - {pref_type} ({s1}, {s2}): Variable not found in objective map (check definition).")
+
+    if prefs_checked > 0:
+        print(f"\nHigh priority preferences checked: {prefs_checked}")
+        print(f"High priority preferences met: {prefs_met} ({(prefs_met/prefs_checked*100):.1f}%)")
+    else:
+        print("\nNo high priority preferences were defined or checked.")
+
+
+elif status == cp_model.INFEASIBLE:
+    print("\n-------------------------")
+    print(">>> PROBLEM INFEASIBLE <<<")
+    print("-------------------------")
+    print("No solution satisfies all HARD constraints.")
+    print("Check conflicts between:")
+    print("  - Admin 'must separate' constraints")
+    print("  - Admin 'must be together' constraints")
+    print("  - Class size constraints (is total student count correct?)")
+    print("Consider making some Admin constraints high-priority soft constraints instead.")
+    # You can use solver.SufficientAssumptionsForInfeasibility() here for advanced debugging
+    # See OR-Tools documentation for details.
+
+elif status == cp_model.MODEL_INVALID:
+    print("Model is invalid. Check constraint definitions and variable domains.")
+    # Look for errors printed during model building phase.
+
+else:
+    print("No solution found (UNKNOWN status).")
+    print("This could mean:")
+    print("  - The time limit was too short for this complex problem.")
+    print("  - The problem might be infeasible, but the solver couldn't prove it within the time limit.")
+    print("  - Try increasing the time limit or simplifying the constraints/objective.")
+
+print("\nScript finished.")
